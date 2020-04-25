@@ -1,0 +1,12 @@
+[package]
+name = "uniq"
+version = "0.1.0"
+authors = ["jazzfool <saveuselon@gmail.com>"]
+edition = "2018"
+
+[features]
+default = []
+id = []
+
+[dependencies]
+reclutch_event = { git = "https://github.com/jazzfool/reclutch" }
