@@ -120,7 +120,7 @@ impl<Id: Clone + std::hash::Hash + Eq + 'static> Queue<Id> {
     /// Emits an event.
     ///
     /// This is a convenience function for [`emit_arc`](Queue::emit_arc), in which the event is moved into an atomically reference-counted pointer.
-    pub fn emit_owned<E: Send + Sync + 'static>(&self, id: Id, event: E) {
+    pub fn emit<E: Send + Sync + 'static>(&self, id: Id, event: E) {
         self.emit_arc(id, Arc::new(event));
     }
 
@@ -184,10 +184,10 @@ mod tests {
             o.push("b0");
         });
 
-        queue.emit_owned(1, EventA);
+        queue.emit(1, EventA);
         queue.emit_arc(0, Arc::new(EventB));
         queue.emit_dyn(0, Arc::new(EventA));
-        queue.emit_owned(0, EventB);
+        queue.emit(0, EventB);
 
         let mut v0 = Vec::new();
         let mut v1 = Vec::new();
@@ -222,11 +222,11 @@ mod tests {
             o.push("b0");
         });
 
-        queue.emit_owned(1, EventA);
+        queue.emit(1, EventA);
         queue.emit_arc(0, Arc::new(EventB));
         std::thread::spawn(move || {
             queue.emit_dyn(0, Arc::new(EventA));
-            queue.emit_owned(0, EventB);
+            queue.emit(0, EventB);
         })
         .join()
         .unwrap();

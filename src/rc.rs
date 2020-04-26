@@ -114,7 +114,7 @@ impl<Id: Clone + std::hash::Hash + Eq + 'static> Queue<Id> {
     /// Emits an event.
     ///
     /// This is a convenience function for [`emit_rc`](Queue::emit_rc), in which the event is moved into a reference-counted pointer.
-    pub fn emit_owned<E: 'static>(&self, id: Id, event: E) {
+    pub fn emit<E: 'static>(&self, id: Id, event: E) {
         self.emit_rc(id, Rc::new(event));
     }
 
@@ -178,10 +178,10 @@ mod tests {
             o.push("b0");
         });
 
-        queue.emit_owned(1, EventA);
+        queue.emit(1, EventA);
         queue.emit_rc(0, Rc::new(EventB));
         queue.emit_dyn(0, Rc::new(EventA));
-        queue.emit_owned(0, EventB);
+        queue.emit(0, EventB);
 
         let mut v0 = Vec::new();
         let mut v1 = Vec::new();
