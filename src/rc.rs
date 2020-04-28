@@ -77,14 +77,11 @@ impl<Id: Clone + std::hash::Hash + Eq, O: 'static, A: 'static> Listener<Id, O, A
 
     /// Processes incoming events and invokes the corresponding handler.
     pub fn dispatch(&mut self, o: &mut O, a: &mut A) {
-        let handlers = &mut self.handlers;
-        self.listener.with(|events| {
-            for event in events {
-                if let Some(handler) = handlers.get_mut(&(event.id.clone(), event.type_id)) {
-                    handler.handle(o, a, event.data.as_ref());
-                }
+        for event in self.listener.peek() {
+            if let Some(handler) = self.handlers.get_mut(&(event.id.clone(), event.type_id)) {
+                handler.handle(o, a, event.data.as_ref());
             }
-        });
+        }
     }
 }
 
