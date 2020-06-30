@@ -6,18 +6,19 @@ use {
     std::{collections::HashMap, sync::Arc},
 };
 
-trait DynHandler<O, A> {
+trait DynHandler<O: ?Sized, A> {
     fn handle(&self, o: &mut O, a: &mut A, e: &dyn any::Any);
 }
 
 type QueueEvent<Id> = Event<Id, Arc<dyn any::Any + Send + Sync>>;
 
-struct Handler<O, A, E, F: Fn(&mut O, &mut A, &E) + Send + Sync>(
+struct Handler<O: ?Sized, A, E, F: Fn(&mut O, &mut A, &E) + Send + Sync>(
     F,
-    std::marker::PhantomData<(O, A, E)>,
+    std::marker::PhantomData<(A, E)>,
+    std::marker::PhantomData<O>,
 );
 
-impl<O, A, E: 'static, F: Fn(&mut O, &mut A, &E) + Send + Sync> DynHandler<O, A>
+impl<O: ?Sized, A, E: 'static, F: Fn(&mut O, &mut A, &E) + Send + Sync> DynHandler<O, A>
     for Handler<O, A, E, F>
 {
     fn handle(&self, o: &mut O, a: &mut A, e: &dyn any::Any) {
@@ -30,13 +31,16 @@ impl<O, A, E: 'static, F: Fn(&mut O, &mut A, &E) + Send + Sync> DynHandler<O, A>
 /// This will not dispatch automatically. [`dispatch`](Listener::dispatch) must be called at regular intervals to handle events.
 ///
 /// This type cannot be constructed directly. Invoke the `listen` method on the corresponding queue to create a new `Listener`.
-pub struct Listener<Id: Clone + std::hash::Hash + Eq, O: 'static, A: 'static> {
+pub struct Listener<Id: Clone + std::hash::Hash + Eq, O: ?Sized + 'static, A: 'static> {
     handlers: HashMap<(Id, any::TypeId), Arc<dyn DynHandler<O, A> + Send + Sync>>,
     listener: event::ts::Listener<QueueEvent<Id>>,
 }
 
-impl<Id: Clone + std::hash::Hash + Eq, O: Send + Sync + 'static, A: Send + Sync + 'static>
-    Listener<Id, O, A>
+impl<
+        Id: Clone + std::hash::Hash + Eq,
+        O: Send + Sync + ?Sized + 'static,
+        A: Send + Sync + 'static,
+    > Listener<Id, O, A>
 {
     /// Adds a handler to `self` and returns `Self`.
     ///
@@ -65,8 +69,10 @@ impl<Id: Clone + std::hash::Hash + Eq, O: Send + Sync + 'static, A: Send + Sync 
         handler: impl Fn(&mut O, &mut A, &E) + Send + Sync + 'static,
     ) -> (Id, any::TypeId) {
         let k = (id, any::TypeId::of::<E>());
-        self.handlers
-            .insert(k.clone(), Arc::new(Handler(handler, Default::default())));
+        self.handlers.insert(
+            k.clone(),
+            Arc::new(Handler(handler, Default::default(), Default::default())),
+        );
         k
     }
 
@@ -142,7 +148,7 @@ impl<Id: Clone + std::hash::Hash + Eq + 'static> Queue<Id> {
     /// Creates a new listener.
     ///
     /// Events emitted prior to this invocation will not be visible to the listener.
-    pub fn listen<O: 'static, A: 'static>(&self) -> EventListener<O, A, Id> {
+    pub fn listen<O: ?Sized + 'static, A: 'static>(&self) -> EventListener<O, A, Id> {
         EventListener {
             handlers: Default::default(),
             listener: self.q.listen(),

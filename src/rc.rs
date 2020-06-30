@@ -6,15 +6,21 @@ use {
     std::{collections::HashMap, rc::Rc},
 };
 
-trait DynHandler<O, A> {
+trait DynHandler<O: ?Sized, A> {
     fn handle(&mut self, o: &mut O, a: &mut A, e: &dyn any::Any);
 }
 
 type QueueEvent<Id> = Event<Id, Rc<dyn any::Any>>;
 
-struct Handler<O, A, E, F: FnMut(&mut O, &mut A, &E)>(F, std::marker::PhantomData<(O, A, E)>);
+struct Handler<O: ?Sized, A, E, F: FnMut(&mut O, &mut A, &E)>(
+    F,
+    std::marker::PhantomData<(A, E)>,
+    std::marker::PhantomData<O>,
+);
 
-impl<O, A, E: 'static, F: FnMut(&mut O, &mut A, &E)> DynHandler<O, A> for Handler<O, A, E, F> {
+impl<O: ?Sized, A, E: 'static, F: FnMut(&mut O, &mut A, &E)> DynHandler<O, A>
+    for Handler<O, A, E, F>
+{
     fn handle(&mut self, o: &mut O, a: &mut A, e: &dyn any::Any) {
         (self.0)(o, a, e.downcast_ref::<E>().unwrap())
     }
@@ -25,12 +31,12 @@ impl<O, A, E: 'static, F: FnMut(&mut O, &mut A, &E)> DynHandler<O, A> for Handle
 /// This will not dispatch automatically. [`dispatch`](Listener::dispatch) must be called at regular intervals to handle events.
 ///
 /// This type cannot be constructed directly. Invoke the `listen` method on the corresponding queue to create a new `Listener`.
-pub struct Listener<Id: Clone + std::hash::Hash + Eq, O: 'static, A: 'static> {
+pub struct Listener<Id: Clone + std::hash::Hash + Eq, O: ?Sized + 'static, A: 'static> {
     handlers: HashMap<(Id, any::TypeId), Box<dyn DynHandler<O, A>>>,
     listener: event::RcEventListener<QueueEvent<Id>>,
 }
 
-impl<Id: Clone + std::hash::Hash + Eq, O: 'static, A: 'static> Listener<Id, O, A> {
+impl<Id: Clone + std::hash::Hash + Eq, O: ?Sized + 'static, A: 'static> Listener<Id, O, A> {
     /// Adds a handler to `self` and returns `Self`.
     ///
     /// `id` marks the source ID. The type of the third parameter of the handler is the event type.
@@ -58,8 +64,10 @@ impl<Id: Clone + std::hash::Hash + Eq, O: 'static, A: 'static> Listener<Id, O, A
         handler: impl FnMut(&mut O, &mut A, &E) + 'static,
     ) -> (Id, any::TypeId) {
         let k = (id, any::TypeId::of::<E>());
-        self.handlers
-            .insert(k.clone(), Box::new(Handler(handler, Default::default())));
+        self.handlers.insert(
+            k.clone(),
+            Box::new(Handler(handler, Default::default(), Default::default())),
+        );
         k
     }
 
@@ -136,7 +144,7 @@ impl<Id: Clone + std::hash::Hash + Eq + 'static> Queue<Id> {
     /// Creates a new listener.
     ///
     /// Events emitted prior to this invocation will not be visible to the listener.
-    pub fn listen<O: 'static, A: 'static>(&self) -> EventListener<O, A, Id> {
+    pub fn listen<O: ?Sized + 'static, A: 'static>(&self) -> EventListener<O, A, Id> {
         EventListener {
             handlers: Default::default(),
             listener: self.q.listen(),
@@ -144,7 +152,7 @@ impl<Id: Clone + std::hash::Hash + Eq + 'static> Queue<Id> {
     }
 }
 
-/// Non-thread-safe listener associated with an [`Queue`](Queue).
+/// Non-thread-safe listener associated with a [`Queue`](Queue).
 pub type EventListener<O, A, Id = u64> = Listener<Id, O, A>;
 
 #[cfg(test)]
