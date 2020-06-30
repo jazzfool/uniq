@@ -3,51 +3,82 @@
 use {
     super::*,
     reclutch_event::{self as event, prelude::*},
-    std::{collections::HashMap, rc::Rc},
+    std::{any::Any, collections::HashMap, rc::Rc},
 };
 
-trait DynHandler<O: ?Sized, A> {
-    fn handle(&mut self, o: &mut O, a: &mut A, e: &dyn any::Any);
+mod private {
+    pub unsafe trait Invoke {
+        unsafe fn invoke(&mut self, it: *mut (), e: &dyn std::any::Any);
+    }
+}
+
+use private::Invoke;
+
+struct DynHandler<T, It: ?Sized + Invoke = dyn Invoke + 'static> {
+    marker: std::marker::PhantomData<fn(&mut T, &dyn Any)>,
+    it: It,
+}
+
+impl<T> DynHandler<T> {
+    pub fn boxed<F>(it: F) -> Box<Self>
+    where
+        F: 'static + FnMut(&mut T, &dyn Any),
+    {
+        unsafe fn extend_lifetime<'lt, T>(
+            it: Box<DynHandler<T, dyn Invoke + 'lt>>,
+        ) -> Box<DynHandler<T, dyn Invoke + 'static>> {
+            std::mem::transmute(it)
+        }
+
+        let ret: Box<DynHandler<T, dyn Invoke>> = Box::new(DynHandler {
+            it: {
+                struct Wrapper<F, T>(F, std::marker::PhantomData<fn(&mut T, &dyn Any)>);
+
+                unsafe impl<F, T> Invoke for Wrapper<F, T>
+                where
+                    F: 'static + FnMut(&mut T, &dyn Any),
+                {
+                    unsafe fn invoke(&mut self, it: *mut (), e: &dyn Any) {
+                        self.0(&mut *it.cast::<T>(), e)
+                    }
+                }
+
+                Wrapper(it, Default::default())
+            },
+            marker: Default::default(),
+        });
+
+        unsafe { extend_lifetime(ret) }
+    }
+
+    pub fn invoke(&mut self, it: &mut T, e: &dyn std::any::Any) {
+        unsafe {
+            let erased: *mut () = <*mut _>::cast(it);
+            self.it.invoke(erased, e);
+        }
+    }
 }
 
 type QueueEvent<Id> = Event<Id, Rc<dyn any::Any>>;
-
-struct Handler<O: ?Sized, A, E, F: FnMut(&mut O, &mut A, &E)>(
-    F,
-    std::marker::PhantomData<(A, E)>,
-    std::marker::PhantomData<O>,
-);
-
-impl<O: ?Sized, A, E: 'static, F: FnMut(&mut O, &mut A, &E)> DynHandler<O, A>
-    for Handler<O, A, E, F>
-{
-    fn handle(&mut self, o: &mut O, a: &mut A, e: &dyn any::Any) {
-        (self.0)(o, a, e.downcast_ref::<E>().unwrap())
-    }
-}
 
 /// An adapter over an underlying listener in which a list of handlers are dispatched based on event type and ID.
 ///
 /// This will not dispatch automatically. [`dispatch`](Listener::dispatch) must be called at regular intervals to handle events.
 ///
 /// This type cannot be constructed directly. Invoke the `listen` method on the corresponding queue to create a new `Listener`.
-pub struct Listener<Id: Clone + std::hash::Hash + Eq, O: ?Sized + 'static, A: 'static> {
-    handlers: HashMap<(Id, any::TypeId), Box<dyn DynHandler<O, A>>>,
+pub struct Listener<Id: Clone + std::hash::Hash + Eq, T> {
+    handlers: HashMap<(Id, any::TypeId), Box<DynHandler<T>>>,
     listener: event::RcEventListener<QueueEvent<Id>>,
 }
 
-impl<Id: Clone + std::hash::Hash + Eq, O: ?Sized + 'static, A: 'static> Listener<Id, O, A> {
+impl<Id: Clone + std::hash::Hash + Eq, T> Listener<Id, T> {
     /// Adds a handler to `self` and returns `Self`.
     ///
     /// `id` marks the source ID. The type of the third parameter of the handler is the event type.
     /// Both of these will be used to match correct events.
     ///
     /// If the ID and event type are already being handled, the handler will be replaced.
-    pub fn and_on<E: 'static>(
-        mut self,
-        id: Id,
-        handler: impl FnMut(&mut O, &mut A, &E) + 'static,
-    ) -> Self {
+    pub fn and_on<E: 'static>(mut self, id: Id, handler: impl FnMut(&mut T, &E) + 'static) -> Self {
         self.on(id, handler);
         self
     }
@@ -61,12 +92,14 @@ impl<Id: Clone + std::hash::Hash + Eq, O: ?Sized + 'static, A: 'static> Listener
     pub fn on<E: 'static>(
         &mut self,
         id: Id,
-        handler: impl FnMut(&mut O, &mut A, &E) + 'static,
+        mut handler: impl FnMut(&mut T, &E) + 'static,
     ) -> (Id, any::TypeId) {
         let k = (id, any::TypeId::of::<E>());
         self.handlers.insert(
             k.clone(),
-            Box::new(Handler(handler, Default::default(), Default::default())),
+            DynHandler::boxed(move |it: &mut T, e: &dyn Any| {
+                handler(it, e.downcast_ref::<E>().unwrap())
+            }),
         );
         k
     }
@@ -84,10 +117,10 @@ impl<Id: Clone + std::hash::Hash + Eq, O: ?Sized + 'static, A: 'static> Listener
     }
 
     /// Processes incoming events and invokes the corresponding handler.
-    pub fn dispatch(&mut self, o: &mut O, a: &mut A) {
+    pub fn dispatch(&mut self, it: &mut T) {
         for event in self.listener.peek() {
             if let Some(handler) = self.handlers.get_mut(&(event.id.clone(), event.type_id)) {
-                handler.handle(o, a, event.data.as_ref());
+                handler.invoke(it, event.data.as_ref());
             }
         }
     }
@@ -136,7 +169,7 @@ impl<Id: Clone + std::hash::Hash + Eq + 'static> Queue<Id> {
     pub fn emit_dyn(&self, id: Id, event: Rc<dyn any::Any>) {
         self.q.emit_owned(Event {
             id,
-            type_id: event.type_id(),
+            type_id: (*event).type_id(),
             data: event,
         });
     }
@@ -144,7 +177,7 @@ impl<Id: Clone + std::hash::Hash + Eq + 'static> Queue<Id> {
     /// Creates a new listener.
     ///
     /// Events emitted prior to this invocation will not be visible to the listener.
-    pub fn listen<O: ?Sized + 'static, A: 'static>(&self) -> EventListener<O, A, Id> {
+    pub fn listen<T>(&self) -> EventListener<T, Id> {
         EventListener {
             handlers: Default::default(),
             listener: self.q.listen(),
@@ -153,7 +186,7 @@ impl<Id: Clone + std::hash::Hash + Eq + 'static> Queue<Id> {
 }
 
 /// Non-thread-safe listener associated with a [`Queue`](Queue).
-pub type EventListener<O, A, Id = u64> = Listener<Id, O, A>;
+pub type EventListener<T, Id = u64> = Listener<Id, T>;
 
 #[cfg(test)]
 mod tests {
@@ -168,18 +201,18 @@ mod tests {
 
         let mut l0 = queue
             .listen()
-            .and_on(0, |o: &mut Vec<&'static str>, _: &mut (), _: &EventA| {
+            .and_on(0, |o: &mut Vec<&'static str>, _: &EventA| {
                 o.push("a0");
             })
-            .and_on(1, |o: &mut Vec<&'static str>, _, _: &EventA| {
+            .and_on(1, |o: &mut Vec<&'static str>, _: &EventA| {
                 o.push("a1");
             })
-            .and_on(0, |o: &mut Vec<&'static str>, _, _: &EventB| {
+            .and_on(0, |o: &mut Vec<&'static str>, _: &EventB| {
                 o.push("b0");
             });
 
         let mut l1 = queue.listen();
-        l1.on(0, |o: &mut Vec<&'static str>, _: &mut (), _: &EventB| {
+        l1.on(0, |o: &mut Vec<&'static str>, _: &EventB| {
             o.push("b0");
         });
 
@@ -191,8 +224,8 @@ mod tests {
         let mut v0 = Vec::new();
         let mut v1 = Vec::new();
 
-        l0.dispatch(&mut v0, &mut ());
-        l1.dispatch(&mut v1, &mut ());
+        l0.dispatch(&mut v0);
+        l1.dispatch(&mut v1);
 
         assert_eq!(&v0, &["a1", "b0", "a0", "b0"]);
         assert_eq!(&v1, &["b0", "b0"]);
