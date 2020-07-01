@@ -26,7 +26,7 @@ pub trait Unpackable<'a>: Packable {
     /// Packs an unpacked reference into a packed non-reference.
     fn pack(unpacked: Self::Unpacked) -> Self::Packed;
     /// Unpacks an non-reference type into an unpacked reference.
-    fn unpack(packed: Self::Packed) -> Self::Unpacked;
+    unsafe fn unpack(packed: Self::Packed) -> Self::Unpacked;
 }
 
 impl Packable for () {
@@ -37,7 +37,7 @@ impl<'a> Unpackable<'a> for () {
     type Unpacked = ();
 
     fn pack(_: ()) {}
-    fn unpack(_: ()) {}
+    unsafe fn unpack(_: ()) {}
 }
 
 impl<T: ?Sized + 'static> Packable for Read<T> {
@@ -53,8 +53,8 @@ impl<'a, T: ?Sized + 'static> Unpackable<'a> for Read<T> {
     }
 
     #[inline]
-    fn unpack(packed: Self::Packed) -> Self::Unpacked {
-        unsafe { &*packed }
+    unsafe fn unpack(packed: Self::Packed) -> Self::Unpacked {
+        &*packed
     }
 }
 
@@ -71,8 +71,8 @@ impl<'a, T: ?Sized + 'static> Unpackable<'a> for Write<T> {
     }
 
     #[inline]
-    fn unpack(packed: Self::Packed) -> Self::Unpacked {
-        unsafe { &mut *packed }
+    unsafe fn unpack(packed: Self::Packed) -> Self::Unpacked {
+        &mut *packed
     }
 }
 
@@ -89,7 +89,7 @@ macro_rules! impl_packaging {
                 ($($x::pack(unpacked.$i)),*)
             }
 
-            fn unpack(packed: Self::Packed) -> Self::Unpacked {
+            unsafe fn unpack(packed: Self::Packed) -> Self::Unpacked {
                 ($($x::unpack(packed.$i)),*)
             }
         }

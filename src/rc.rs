@@ -55,7 +55,12 @@ impl<Id: Clone + std::hash::Hash + Eq, T: Packable> Listener<Id, T> {
         let k = (id, any::TypeId::of::<E>());
         self.handlers.insert(
             k.clone(),
-            Box::new(move |packed, ev| handler(T::unpack(packed), ev.downcast_ref::<E>().unwrap())),
+            Box::new(move |packed, ev| {
+                handler(
+                    unsafe { T::unpack(packed) },
+                    ev.downcast_ref::<E>().unwrap(),
+                )
+            }),
         );
         k
     }
@@ -80,6 +85,7 @@ impl<Id: Clone + std::hash::Hash + Eq, T: Packable> Listener<Id, T> {
         self.dispatch_packed(T::pack(it))
     }
 
+    /// Dispatches with pre-packed parameters.
     pub fn dispatch_packed(&mut self, packed: <T as Packable>::Packed) {
         for event in self.listener.peek() {
             if let Some(handler) = self.handlers.get_mut(&(event.id.clone(), event.type_id)) {
