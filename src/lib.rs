@@ -3,7 +3,7 @@ pub mod rc;
 
 pub(crate) mod pack;
 
-pub use pack::{Read, Write};
+pub use pack::{Packable, Read, Unpackable, Write};
 
 use std::any;
 

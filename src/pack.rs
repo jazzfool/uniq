@@ -1,6 +1,8 @@
 use std::marker::PhantomData;
 
+/// Marker denoting an immutable parameter which will appear in the `Listener` method signatures and handlers as `&T`.
 pub struct Read<T: ?Sized + 'static>(PhantomData<T>);
+/// Marker denoting a mutable parameter which will appear in the `Listener` method signatures and handlers as `&mut T`.
 pub struct Write<T: ?Sized + 'static>(PhantomData<T>);
 
 // We need to "package" references into raw pointers in order to evade dropck.
@@ -10,14 +12,20 @@ pub struct Write<T: ?Sized + 'static>(PhantomData<T>);
 
 // Once lazy normalization is implemented, this should be revisited.
 
+/// Parameter type which can be packed into a copyable non-reference type.
 pub trait Packable {
+    /// The copyable non-reference "packed" type.
     type Packed: Copy;
 }
 
+/// Parameter type which can be unpacked from a copyable non-reference type into a reference with a specified lifetime.
 pub trait Unpackable<'a>: Packable {
+    /// The reference type with the specified lifetime.
     type Unpacked: 'a;
 
+    /// Packs an unpacked reference into a packed non-reference.
     fn pack(unpacked: Self::Unpacked) -> Self::Packed;
+    /// Unpacks an non-reference type into an unpacked reference.
     fn unpack(packed: Self::Packed) -> Self::Unpacked;
 }
 
