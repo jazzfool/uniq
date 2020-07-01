@@ -2,62 +2,10 @@
 
 use {
     super::*,
+    crate::pack::{Packable, Unpackable},
     reclutch_event::{self as event, prelude::*},
     std::{any::Any, collections::HashMap, rc::Rc},
 };
-
-mod private {
-    pub unsafe trait Invoke {
-        unsafe fn invoke(&mut self, it: *mut (), e: &dyn std::any::Any);
-    }
-}
-
-use private::Invoke;
-
-struct DynHandler<T, It: ?Sized + Invoke = dyn Invoke + 'static> {
-    marker: std::marker::PhantomData<fn(&mut T, &dyn Any)>,
-    it: It,
-}
-
-impl<T> DynHandler<T> {
-    pub fn boxed<F>(it: F) -> Box<Self>
-    where
-        F: 'static + FnMut(&mut T, &dyn Any),
-    {
-        unsafe fn extend_lifetime<'lt, T>(
-            it: Box<DynHandler<T, dyn Invoke + 'lt>>,
-        ) -> Box<DynHandler<T, dyn Invoke + 'static>> {
-            std::mem::transmute(it)
-        }
-
-        let ret: Box<DynHandler<T, dyn Invoke>> = Box::new(DynHandler {
-            it: {
-                struct Wrapper<F, T>(F, std::marker::PhantomData<fn(&mut T, &dyn Any)>);
-
-                unsafe impl<F, T> Invoke for Wrapper<F, T>
-                where
-                    F: 'static + FnMut(&mut T, &dyn Any),
-                {
-                    unsafe fn invoke(&mut self, it: *mut (), e: &dyn Any) {
-                        self.0(&mut *it.cast::<T>(), e)
-                    }
-                }
-
-                Wrapper(it, Default::default())
-            },
-            marker: Default::default(),
-        });
-
-        unsafe { extend_lifetime(ret) }
-    }
-
-    pub fn invoke(&mut self, it: &mut T, e: &dyn std::any::Any) {
-        unsafe {
-            let erased: *mut () = <*mut _>::cast(it);
-            self.it.invoke(erased, e);
-        }
-    }
-}
 
 type QueueEvent<Id> = Event<Id, Rc<dyn any::Any>>;
 
@@ -66,19 +14,26 @@ type QueueEvent<Id> = Event<Id, Rc<dyn any::Any>>;
 /// This will not dispatch automatically. [`dispatch`](Listener::dispatch) must be called at regular intervals to handle events.
 ///
 /// This type cannot be constructed directly. Invoke the `listen` method on the corresponding queue to create a new `Listener`.
-pub struct Listener<Id: Clone + std::hash::Hash + Eq, T> {
-    handlers: HashMap<(Id, any::TypeId), Box<DynHandler<T>>>,
+pub struct Listener<Id: Clone + std::hash::Hash + Eq, T: Packable> {
+    handlers: HashMap<(Id, any::TypeId), Box<dyn FnMut(<T as Packable>::Packed, &dyn Any)>>,
     listener: event::RcEventListener<QueueEvent<Id>>,
 }
 
-impl<Id: Clone + std::hash::Hash + Eq, T> Listener<Id, T> {
+impl<Id: Clone + std::hash::Hash + Eq, T: Packable> Listener<Id, T> {
     /// Adds a handler to `self` and returns `Self`.
     ///
     /// `id` marks the source ID. The type of the third parameter of the handler is the event type.
     /// Both of these will be used to match correct events.
     ///
     /// If the ID and event type are already being handled, the handler will be replaced.
-    pub fn and_on<E: 'static>(mut self, id: Id, handler: impl FnMut(&mut T, &E) + 'static) -> Self {
+    pub fn and_on<'a, E: 'static, P: 'a>(
+        mut self,
+        id: Id,
+        handler: impl FnMut(P, &E) + 'static,
+    ) -> Self
+    where
+        T: Unpackable<'a, Unpacked = P>,
+    {
         self.on(id, handler);
         self
     }
@@ -89,17 +44,18 @@ impl<Id: Clone + std::hash::Hash + Eq, T> Listener<Id, T> {
     /// Both of these will be used to match correct events.
     ///
     /// If the ID and event type are already being handled, the handler will be replaced.
-    pub fn on<E: 'static>(
+    pub fn on<'a, E: 'static, P: 'a>(
         &mut self,
         id: Id,
-        mut handler: impl FnMut(&mut T, &E) + 'static,
-    ) -> (Id, any::TypeId) {
+        mut handler: impl FnMut(P, &E) + 'static,
+    ) -> (Id, any::TypeId)
+    where
+        T: Unpackable<'a, Unpacked = P>,
+    {
         let k = (id, any::TypeId::of::<E>());
         self.handlers.insert(
             k.clone(),
-            DynHandler::boxed(move |it: &mut T, e: &dyn Any| {
-                handler(it, e.downcast_ref::<E>().unwrap())
-            }),
+            Box::new(move |packed, ev| handler(T::unpack(packed), ev.downcast_ref::<E>().unwrap())),
         );
         k
     }
@@ -117,10 +73,14 @@ impl<Id: Clone + std::hash::Hash + Eq, T> Listener<Id, T> {
     }
 
     /// Processes incoming events and invokes the corresponding handler.
-    pub fn dispatch(&mut self, it: &mut T) {
+    pub fn dispatch(&mut self, it: <T as Unpackable<'_>>::Unpacked)
+    where
+        T: for<'a> Unpackable<'a>,
+    {
+        let packed = T::pack(it);
         for event in self.listener.peek() {
             if let Some(handler) = self.handlers.get_mut(&(event.id.clone(), event.type_id)) {
-                handler.invoke(it, event.data.as_ref());
+                handler(packed, event.data.as_ref());
             }
         }
     }
@@ -177,7 +137,7 @@ impl<Id: Clone + std::hash::Hash + Eq + 'static> Queue<Id> {
     /// Creates a new listener.
     ///
     /// Events emitted prior to this invocation will not be visible to the listener.
-    pub fn listen<T>(&self) -> EventListener<T, Id> {
+    pub fn listen<T: Packable>(&self) -> EventListener<T, Id> {
         EventListener {
             handlers: Default::default(),
             listener: self.q.listen(),
@@ -200,19 +160,19 @@ mod tests {
         let queue: Queue = Queue::new();
 
         let mut l0 = queue
-            .listen()
-            .and_on(0, |o: &mut Vec<&'static str>, _: &EventA| {
+            .listen::<Write<Vec<&'static str>>>()
+            .and_on(0, |o, _: &EventA| {
                 o.push("a0");
             })
-            .and_on(1, |o: &mut Vec<&'static str>, _: &EventA| {
+            .and_on(1, |o, _: &EventA| {
                 o.push("a1");
             })
-            .and_on(0, |o: &mut Vec<&'static str>, _: &EventB| {
+            .and_on(0, |o, _: &EventB| {
                 o.push("b0");
             });
 
-        let mut l1 = queue.listen();
-        l1.on(0, |o: &mut Vec<&'static str>, _: &EventB| {
+        let mut l1 = queue.listen::<Write<Vec<&'static str>>>();
+        l1.on(0, |o, _: &EventB| {
             o.push("b0");
         });
 

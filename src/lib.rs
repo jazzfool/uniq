@@ -1,6 +1,10 @@
 pub mod arc;
 pub mod rc;
 
+pub(crate) mod pack;
+
+pub use pack::{Read, Write};
+
 use std::any;
 
 #[cfg(feature = "id")]

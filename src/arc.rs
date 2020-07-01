@@ -2,57 +2,39 @@
 
 use {
     super::*,
+    crate::pack::{Packable, Unpackable},
     reclutch_event::{self as event, prelude::*},
-    std::{collections::HashMap, sync::Arc},
+    std::{any::Any, collections::HashMap, sync::Arc},
 };
 
-trait DynHandler<O: ?Sized, A> {
-    fn handle(&self, o: &mut O, a: &mut A, e: &dyn any::Any);
-}
-
 type QueueEvent<Id> = Event<Id, Arc<dyn any::Any + Send + Sync>>;
-
-struct Handler<O: ?Sized, A, E, F: Fn(&mut O, &mut A, &E) + Send + Sync>(
-    F,
-    std::marker::PhantomData<(A, E)>,
-    std::marker::PhantomData<O>,
-);
-
-impl<O: ?Sized, A, E: 'static, F: Fn(&mut O, &mut A, &E) + Send + Sync> DynHandler<O, A>
-    for Handler<O, A, E, F>
-{
-    fn handle(&self, o: &mut O, a: &mut A, e: &dyn any::Any) {
-        (self.0)(o, a, e.downcast_ref::<E>().unwrap())
-    }
-}
 
 /// An adapter over an underlying listener in which a list of handlers are dispatched based on event type and ID.
 ///
 /// This will not dispatch automatically. [`dispatch`](Listener::dispatch) must be called at regular intervals to handle events.
 ///
 /// This type cannot be constructed directly. Invoke the `listen` method on the corresponding queue to create a new `Listener`.
-pub struct Listener<Id: Clone + std::hash::Hash + Eq, O: ?Sized + 'static, A: 'static> {
-    handlers: HashMap<(Id, any::TypeId), Arc<dyn DynHandler<O, A> + Send + Sync>>,
+pub struct Listener<Id: Clone + std::hash::Hash + Eq, T: Packable> {
+    handlers:
+        HashMap<(Id, any::TypeId), Arc<dyn Fn(<T as Packable>::Packed, &dyn Any) + Send + Sync>>,
     listener: event::ts::Listener<QueueEvent<Id>>,
 }
 
-impl<
-        Id: Clone + std::hash::Hash + Eq,
-        O: Send + Sync + ?Sized + 'static,
-        A: Send + Sync + 'static,
-    > Listener<Id, O, A>
-{
+impl<Id: Clone + std::hash::Hash + Eq, T: Packable> Listener<Id, T> {
     /// Adds a handler to `self` and returns `Self`.
     ///
     /// `id` marks the source ID. The type of the third parameter of the handler is the event type.
     /// Both of these will be used to match correct events.
     ///
     /// If the ID and event type are already being handled, the handler will be replaced.
-    pub fn and_on<E: Send + Sync + 'static>(
+    pub fn and_on<'a, E: Send + Sync + 'static, P: 'a>(
         mut self,
         id: Id,
-        handler: impl Fn(&mut O, &mut A, &E) + Send + Sync + 'static,
-    ) -> Self {
+        handler: impl Fn(P, &E) + Send + Sync + 'static,
+    ) -> Self
+    where
+        T: Unpackable<'a, Unpacked = P>,
+    {
         self.on(id, handler);
         self
     }
@@ -63,15 +45,18 @@ impl<
     /// Both of these will be used to match correct events.
     ///
     /// If the ID and event type are already being handled, the handler will be replaced.
-    pub fn on<E: Send + Sync + 'static>(
+    pub fn on<'a, E: Send + Sync + 'static, P: 'a>(
         &mut self,
         id: Id,
-        handler: impl Fn(&mut O, &mut A, &E) + Send + Sync + 'static,
-    ) -> (Id, any::TypeId) {
+        handler: impl Fn(P, &E) + Send + Sync + 'static,
+    ) -> (Id, any::TypeId)
+    where
+        T: Unpackable<'a, Unpacked = P>,
+    {
         let k = (id, any::TypeId::of::<E>());
         self.handlers.insert(
             k.clone(),
-            Arc::new(Handler(handler, Default::default(), Default::default())),
+            Arc::new(move |packed, ev| handler(T::unpack(packed), ev.downcast_ref::<E>().unwrap())),
         );
         k
     }
@@ -89,10 +74,14 @@ impl<
     }
 
     /// Processes incoming events and invokes the corresponding handler.
-    pub fn dispatch(&mut self, o: &mut O, a: &mut A) {
+    pub fn dispatch(&mut self, it: <T as Unpackable<'_>>::Unpacked)
+    where
+        T: for<'a> Unpackable<'a>,
+    {
+        let packed = T::pack(it);
         for event in self.listener.peek() {
             if let Some(handler) = self.handlers.get_mut(&(event.id.clone(), event.type_id)) {
-                handler.handle(o, a, event.data.as_ref());
+                handler(packed, event.data.as_ref());
             }
         }
     }
@@ -140,7 +129,7 @@ impl<Id: Clone + std::hash::Hash + Eq + 'static> Queue<Id> {
     pub fn emit_dyn(&self, id: Id, event: Arc<dyn any::Any + Send + Sync>) {
         self.q.emit_owned(Event {
             id,
-            type_id: event.type_id(),
+            type_id: (*event).type_id(),
             data: event,
         });
     }
@@ -148,7 +137,7 @@ impl<Id: Clone + std::hash::Hash + Eq + 'static> Queue<Id> {
     /// Creates a new listener.
     ///
     /// Events emitted prior to this invocation will not be visible to the listener.
-    pub fn listen<O: ?Sized + 'static, A: 'static>(&self) -> EventListener<O, A, Id> {
+    pub fn listen<T: Packable>(&self) -> EventListener<T, Id> {
         EventListener {
             handlers: Default::default(),
             listener: self.q.listen(),
@@ -157,7 +146,7 @@ impl<Id: Clone + std::hash::Hash + Eq + 'static> Queue<Id> {
 }
 
 /// Thread-safe listener associated with an [`Queue`](Queue).
-pub type EventListener<O, A, Id = u64> = Listener<Id, O, A>;
+pub type EventListener<T, Id = u64> = Listener<Id, T>;
 
 #[cfg(test)]
 mod tests {
@@ -171,19 +160,19 @@ mod tests {
         let queue: Queue = Queue::new();
 
         let mut l0 = queue
-            .listen()
-            .and_on(0, |o: &mut Vec<&'static str>, _: &mut (), _: &EventA| {
+            .listen::<Write<Vec<&'static str>>>()
+            .and_on(0, |o, _: &EventA| {
                 o.push("a0");
             })
-            .and_on(1, |o: &mut Vec<&'static str>, _, _: &EventA| {
+            .and_on(1, |o, _: &EventA| {
                 o.push("a1");
             })
-            .and_on(0, |o: &mut Vec<&'static str>, _, _: &EventB| {
+            .and_on(0, |o, _: &EventB| {
                 o.push("b0");
             });
 
-        let mut l1 = queue.listen();
-        l1.on(0, |o: &mut Vec<&'static str>, _: &mut (), _: &EventB| {
+        let mut l1 = queue.listen::<Write<Vec<&'static str>>>();
+        l1.on(0, |o: &mut Vec<&'static str>, _: &EventB| {
             o.push("b0");
         });
 
@@ -195,8 +184,8 @@ mod tests {
         let mut v0 = Vec::new();
         let mut v1 = Vec::new();
 
-        l0.dispatch(&mut v0, &mut ());
-        l1.dispatch(&mut v1, &mut ());
+        l0.dispatch(&mut v0);
+        l1.dispatch(&mut v1);
 
         assert_eq!(&v0, &["a1", "b0", "a0", "b0"]);
         assert_eq!(&v1, &["b0", "b0"]);
@@ -209,19 +198,19 @@ mod tests {
         let queue: Queue = Queue::new();
 
         let mut l0 = queue
-            .listen()
-            .and_on(0, |o: &mut Vec<&'static str>, _: &mut (), _: &EventA| {
+            .listen::<Write<Vec<&'static str>>>()
+            .and_on(0, |o, _: &EventA| {
                 o.push("a0");
             })
-            .and_on(1, |o, _, _: &EventA| {
+            .and_on(1, |o, _: &EventA| {
                 o.push("a1");
             })
-            .and_on(0, |o, _, _: &EventB| {
+            .and_on(0, |o, _: &EventB| {
                 o.push("b0");
             });
 
-        let mut l1 = queue.listen();
-        l1.on(0, |o: &mut Vec<&'static str>, _: &mut (), _: &EventB| {
+        let mut l1 = queue.listen::<Write<Vec<&'static str>>>();
+        l1.on(0, |o, _: &EventB| {
             o.push("b0");
         });
 
@@ -237,10 +226,10 @@ mod tests {
         let mut v0 = Vec::new();
         let v1 = Arc::new(Mutex::new(Vec::new()));
 
-        l0.dispatch(&mut v0, &mut ());
+        l0.dispatch(&mut v0);
 
         let v1b = Arc::clone(&v1);
-        std::thread::spawn(move || l1.dispatch(&mut *v1b.lock().unwrap(), &mut ()))
+        std::thread::spawn(move || l1.dispatch(&mut *v1b.lock().unwrap()))
             .join()
             .unwrap();
 

@@ -7,17 +7,17 @@ Unique application-wide queue adapter through strongly-typed event identificatio
 let q = rc::Queue::new();
 // The ID type is generic, but it defaults to `u64`.
 
-let mut l1 = q.listen()
-    .and_on(0, |_: &mut (), _event: &ClickEvent| {
+let mut l1 = q.listen::<()>()
+    .and_on(0, |_, _event: &ClickEvent| {
         println!("listener 1 observed a click from id 0");
     })
-    .and_on(5, |_, _, _event: &WindowEvent| {
-        // we don't need to specify `&mut ()` since we already specified it in the earlier closure (intra-listener homogenity).
+    .and_on(5, |_, _event: &WindowEvent| {
         println!("listener 1 observed a window event from id 5");
     });
 
-let mut l2 = q.listen()
-    .and_on(3, |_: &mut i32, _event: &NetworkEvent| {
+let mut l2 = q.listen::<Write<i32>>()
+    .and_on(3, |n: &mut i32, _event: &NetworkEvent| {
+        *n += 1;
         println!("listener 2 observed a network event from id 3");
     })
     .and_on(2, |_, _event: &NetworkEvent| {
@@ -31,20 +31,25 @@ q.emit_owned(5, WindowEvent);
 
 l1.dispatch(&mut ());
 l2.dispatch(&mut 0);
-// Note that the first parameter of the closure in `l2` differ from that of `l1` (inter-listener heterogenity).
 ```
 
 The first parameter of the event handlers is an arbitrary mutable object that can be passed to handler code. The type of this parameter is homogenous intra-listener and heterogenous inter-listener.
 
-In the `Rc` variant, this mutable object can be a tuple so that you can pass multiple mutable references:
+Notice that the second listener is able to distinguish `NetworkEvents` coming from two difference sources.
+
+This mutable object can be a tuple of `Read`/`Write`s so that you can pass multiple mutable or immutable references:
 ```rust
-let mut l = q.listen()
-    .and_on(0, |_: &mut (&mut Foo, &mut Bar), _event: &Event| { /* ... */ })
+let mut l = q.listen::<(Write<Foo>, Read<FooBar>, Write<Bar>)>()
+    .and_on(0, |_: &mut (&mut Foo, &FooBar, &mut Bar), _event: &Event| { /* ... */ });
+
+let mut foo = Foo::new();
+let foo_bar = FooBar::new();
+let mut bar = Bar::new();
+
+l.dispatch(&mut foo, &foo_bar, &mut bar);
 ```
 
-Note that this multi-parameter feature uses `unsafe` code under-the-hood, but thus far it appears to be sound (+ Miri). It is unlikely this feature will be brought over to the `Arc` variant.
-
-Notice that the second listener is able to distinguish `NetworkEvents` coming from two difference sources.
+There is no limit on the permutation of the `Read`/`Writes`, however only a total of 10 is permitted. This can easily be increased if need be (open an issue), but realistically, it's unlikely you'll need more.
 
 There's a simple additional utility module; `uniq::id`, which will atomically generate a globally unique ID. This is useful for typical applications of `uniq`.
 
