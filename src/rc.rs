@@ -77,7 +77,10 @@ impl<Id: Clone + std::hash::Hash + Eq, T: Packable> Listener<Id, T> {
     where
         T: for<'a> Unpackable<'a>,
     {
-        let packed = T::pack(it);
+        self.dispatch_packed(T::pack(it))
+    }
+
+    pub fn dispatch_packed(&mut self, packed: <T as Packable>::Packed) {
         for event in self.listener.peek() {
             if let Some(handler) = self.handlers.get_mut(&(event.id.clone(), event.type_id)) {
                 handler(packed, event.data.as_ref());
